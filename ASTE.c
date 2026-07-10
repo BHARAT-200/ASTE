@@ -1,9 +1,12 @@
+// ASTE.c
+
 #include<stdio.h>
 #include<stdlib.h>
 #include<termios.h>
 #include<unistd.h>
 #include<ctype.h>
 #include<errno.h>
+#include<string.h>
 #include<sys/ioctl.h>
 #include"ASTE.h"
 
@@ -11,7 +14,8 @@ struct editorConfig E;
 
 /*Init*/
 void initEd() {
-  if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
+    E.curx = E.cury = 0;
+    if(getWindowSize(&E.screenrows, &E.screencols) == -1){ die("getWindowSize"); }
 }
 
 /*Terminal Helpers*/
@@ -44,13 +48,31 @@ void enableRawMode(){
     if(tcsetattr(STDIN_FILENO, TCSAFLUSH, &term) == -1){ die("tcsetattr"); };
 }
 
-char edReadKey(){
+int edReadKey(){
     ssize_t nread;
     char c;
     while((nread = read(STDIN_FILENO, &c, 1)) != 1){
         if(nread == -1  &&  errno != EAGAIN){ die("read"); }
     }
-    return c;
+
+    if(c == '\x1b'){
+        char seq[3];
+        if(read(STDIN_FILENO, &seq[0], 1) != 1){ return '\x1b'; }
+        if(read(STDIN_FILENO, &seq[1], 1) != 1){ return '\x1b'; }
+        if(seq[0] == '[') {
+        switch (seq[1]) {
+            case 'A': return ARROW_UP;
+            case 'B': return ARROW_DOWN;
+            case 'C': return ARROW_RIGHT;
+            case 'D': return ARROW_LEFT;
+        }
+    }
+
+    return '\x1b';
+    }
+    else{
+        return c;
+    }
 }
 
 
@@ -84,37 +106,98 @@ int getWindowSize(int * rows, int * columns){
 
 }
 
+void abufAppend(struct abuf * ab, const char * s, int len){
+    char * new = realloc(ab->b, ab->len + len);
+
+    if(new == NULL){ return; }
+    memcpy(&new[ab->len], s, len);
+    ab->b = new; ab->len += len;
+}
+
+void abFree(struct abuf * ab){
+    free(ab->b);
+}
+
 /*Input*/
+
+void edMoveCursor(int key) {
+  switch (key) {
+    case ARROW_LEFT:
+      E.curx--;
+      break;
+    case ARROW_RIGHT:
+      E.curx++;
+      break;
+    case ARROW_UP:
+      E.cury--;
+      break;
+    case ARROW_DOWN:
+      E.cury++;
+      break;
+  }
+}
+
 void edProcessKeypress(){
-    char c = edReadKey();
+    int c = edReadKey();
     switch(c){
         case CTRL_KEY('q'):
             write(STDOUT_FILENO, "\x1b[2J", 4);
             write(STDOUT_FILENO, "\x1b[H", 3);
             exit(0);
             break;
+
+        case ARROW_UP:
+        case ARROW_DOWN:
+        case ARROW_LEFT:
+        case ARROW_RIGHT:
+        edMoveCursor(c);
+        break;
     }
     
 }
 
 /*** output ***/
-void edDrawRows(){
+void edDrawRows(struct abuf * ab){
     for(int i = 0; i < E.screenrows; i++){
-        write(STDOUT_FILENO, "~", 1);
+        if(i == E.screenrows / 3){
+        char welcome[80];
+        int welcomelen = snprintf(welcome, sizeof(welcome), "ASTE - A Simple Text Editor");
+        if(welcomelen > E.screencols){ welcomelen = E.screencols; }
+        int padding = (E.screencols - welcomelen) / 2;
+        if(padding){
+            abufAppend(ab, "~", 1);
+            padding--;
+        }
+        for (; padding > 0; abufAppend(ab, " ", 1), padding--);
+    
+        abufAppend(ab, welcome, welcomelen);
+        }
+        else{ abufAppend(ab, "~", 1); }
 
+        abufAppend(ab, "\x1b[K", 3);
         if(i < E.screenrows - 1){
-            write(STDOUT_FILENO, "\r\n", 2);
+            abufAppend(ab, "\r\n", 2);
 
         }
     }
 }
 
-void edRefreshScreen() {
-    write(STDOUT_FILENO, "\x1b[2J", 4);
-    write(STDOUT_FILENO, "\x1b[H", 3);
+void edRefreshScreen(){
+    struct abuf ab = ABUF_INIT;
 
-    edDrawRows();
-    write(STDOUT_FILENO, "\x1b[H", 3);
+    abufAppend(&ab, "\x1b[?25l", 6);
+    abufAppend(&ab, "\x1b[H", 3);
+
+    edDrawRows(&ab);
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cury + 1, E.curx + 1);
+    abufAppend(&ab, buf, strlen(buf));
+
+    abufAppend(&ab, "\x1b[?25h", 6);
+
+    write(STDOUT_FILENO, ab.b, ab.len);
+    abFree(&ab);
 }
 
 int main(){
