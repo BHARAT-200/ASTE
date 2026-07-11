@@ -8,9 +8,14 @@
 
 enum editorKey {
   ARROW_LEFT = 1000,
-  ARROW_RIGHT = 1001,
-  ARROW_UP = 1002,
-  ARROW_DOWN = 1003
+  ARROW_RIGHT,
+  ARROW_UP,
+  ARROW_DOWN,
+  DEL_KEY,
+  HOME_KEY,
+  END_KEY,
+  PAGE_UP,
+  PAGE_DOWN
 };
 
 struct editorConfig{
