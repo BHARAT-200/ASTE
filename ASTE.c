@@ -1,22 +1,16 @@
 // ASTE.c
 
-#include<stdio.h>
-#include<stdlib.h>
-#include<termios.h>
-#include<unistd.h>
-#include<ctype.h>
-#include<errno.h>
-#include<string.h>
-#include<sys/ioctl.h>
+
 #include"ASTE.h"
 
 struct editorConfig E;
 
 /*Init*/
 void initEd() {
-    E.curx = E.cury = 0;
+    E.curx = E.cury = E.rowoff = E.nrows = 0; E.row = NULL;
     if(getWindowSize(&E.screenrows, &E.screencols) == -1){ die("getWindowSize"); }
 }
+
 
 /*Terminal Helpers*/
 void die(const char * s){
@@ -104,7 +98,6 @@ int edReadKey() {
     return '\x1b';
 }
 
-
 int getCursorPosition(int *rows, int *cols){
     char buf[32];
     unsigned int i = 0;
@@ -147,7 +140,39 @@ void abFree(struct abuf * ab){
     free(ab->b);
 }
 
-/*Input*/
+
+/* Row Operations */
+
+void edAppendRow(char * s, size_t len){
+    E.row = realloc(E.row, sizeof(erow) * (E.nrows + 1));
+    int at = E.nrows;
+    E.row[at].size = len;
+    E.row[at].chars = malloc(sizeof(char) * (len + 1));
+    memcpy(E.row[at].chars, s, len);
+    E.row[at].chars[len] = '\0';
+    E.nrows++;
+}
+
+
+/* File IO */
+
+void edOpen(char * filename){
+    FILE * fp = fopen(filename, "r");
+    if(!fp){ die("fopen"); }
+    char * line = NULL;
+    size_t linecap = 0;
+    ssize_t llen;
+    while((llen = getline(&line, &linecap, fp)) != -1){
+        while(llen > 0  &&  (line[llen - 1] == '\n'  ||  line[llen - 1] == '\r')){  // remove newline
+            llen--;
+        }
+        edAppendRow(line, llen);
+    }
+    free(line); fclose(fp);
+}
+
+
+/* Input */
 
 void edMoveCursor(int key) {
   switch (key) {
@@ -157,7 +182,7 @@ void edMoveCursor(int key) {
         }
         break;
     case ARROW_RIGHT:
-        if(E.curx != E.screencols - 1) {
+        if(E.curx != E.screencols - 1){
             E.curx++;
         }
         break;
@@ -167,7 +192,7 @@ void edMoveCursor(int key) {
         }
         break;
     case ARROW_DOWN:
-        if(E.cury != E.screenrows - 1) {
+        if(E.cury < E.screenrows){
             E.cury++;
         }
         break;
@@ -208,33 +233,53 @@ void edProcessKeypress(){
     
 }
 
-/*** output ***/
+
+/* output */
+
+void edScroll(){
+    if(E.cury < E.rowoff){
+        E.rowoff = E.cury;
+    }
+    if(E.cury >= E.rowoff + E.screenrows){
+        E.rowoff = E.cury - E.screenrows - 1;
+    }
+}
+
 void edDrawRows(struct abuf * ab){
     for(int i = 0; i < E.screenrows; i++){
-        if(i == E.screenrows / 3){
-        char welcome[80];
-        int welcomelen = snprintf(welcome, sizeof(welcome), "ASTE - A Simple Text Editor");
-        if(welcomelen > E.screencols){ welcomelen = E.screencols; }
-        int padding = (E.screencols - welcomelen) / 2;
-        if(padding){
-            abufAppend(ab, "~", 1);
-            padding--;
+        int filerow = i + E.rowoff;
+        if(filerow >= E.nrows){
+            if(E.nrows == 0  &&  i == E.screenrows / 3){
+            char welcome[80];
+            int welcomelen = snprintf(welcome, sizeof(welcome), "ASTE - A Simple Text Editor");
+            if(welcomelen > E.screencols){ welcomelen = E.screencols; }
+            int padding = (E.screencols - welcomelen) / 2;
+            if(padding){
+                abufAppend(ab, "~", 1);
+                padding--;
+            }
+            for (; padding > 0; abufAppend(ab, " ", 1), padding--);
+        
+            abufAppend(ab, welcome, welcomelen);
+            }
+            else{
+                abufAppend(ab, "~", 1);
+            }
         }
-        for (; padding > 0; abufAppend(ab, " ", 1), padding--);
-    
-        abufAppend(ab, welcome, welcomelen);
+        else{
+            int len = E.row[filerow].size;
+            if(len > E.screencols) { len = E.screencols; }
+            abufAppend(ab, E.row[filerow].chars, len);
         }
-        else{ abufAppend(ab, "~", 1); }
-
         abufAppend(ab, "\x1b[K", 3);
         if(i < E.screenrows - 1){
             abufAppend(ab, "\r\n", 2);
-
         }
     }
 }
 
 void edRefreshScreen(){
+    edScroll();
     struct abuf ab = ABUF_INIT;
 
     abufAppend(&ab, "\x1b[?25l", 6);
@@ -252,9 +297,14 @@ void edRefreshScreen(){
     abFree(&ab);
 }
 
-int main(){
+/* Main */
+int main(int argc, char * argv[]){
     enableRawMode();
     initEd();
+    if(argc >= 2){
+        edOpen(argv[1]);
+    }
+
     while(1){
         edRefreshScreen();
         edProcessKeypress();

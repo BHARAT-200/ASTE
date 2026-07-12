@@ -1,8 +1,21 @@
 // ASTE.h
 
+
 #ifndef ASTE_H
 #define ASTE_H
-#include <termios.h>
+#define _DEFAULT_SOURCE
+#define _BSD_SOURCE
+#define _GNU_SOURCE
+
+#include<stdio.h>
+#include<stdlib.h>
+#include<termios.h>
+#include<unistd.h>
+#include<ctype.h>
+#include<errno.h>
+#include<string.h>
+#include<sys/types.h>
+#include<sys/ioctl.h>
 
 #define CTRL_KEY(k) ((k) & 0x1f)
 
@@ -18,16 +31,24 @@ enum editorKey {
   PAGE_DOWN
 };
 
+typedef struct erow{  // Contains a row of text
+    int size;
+    char * chars;
+} erow;
+
 struct editorConfig{
     int curx, cury;
+    int rowoff;
     int screenrows;
     int screencols;
+    int nrows;
+    erow * row;
     struct termios orig_term;
 };
 
 extern struct editorConfig E;
 
-struct abuf{
+struct abuf{  // buffer used to replace frequent write() calls
     char * b;
     int len;
 };
