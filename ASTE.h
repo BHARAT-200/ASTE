@@ -18,6 +18,7 @@
 #include<sys/ioctl.h>
 
 #define CTRL_KEY(k) ((k) & 0x1f)
+#define TAB_STOP 8
 
 enum editorKey {
   ARROW_LEFT = 1000,
@@ -33,16 +34,21 @@ enum editorKey {
 
 typedef struct erow{  // Contains a row of text
     int size;
+    int rsize;
     char * chars;
+    char * render;
 } erow;
 
 struct editorConfig{
     int curx, cury;
+    int renx;
     int rowoff;
+    int coloff;
     int screenrows;
     int screencols;
     int nrows;
     erow * row;
+    char * filename;
     struct termios orig_term;
 };
 
@@ -56,25 +62,36 @@ struct abuf{  // buffer used to replace frequent write() calls
 #define ABUF_INIT {NULL, 0}
 
 /* Init */
-
 void initEd(void);
 
 /* Terminal helpers */
-
 void die(const char *s);
 void enableRawMode(void);
 void disableRawMode(void);
-int edReadKey(void);
 
+int edReadKey(void);
 int getCursorPosition(int *rows, int *cols);
 int getWindowSize(int *rows, int *cols);
 
+void abAppend(struct abuf *ab, const char *s, int len);
+void abFree(struct abuf *ab);
+
+/* Row operations */
+int edRowCurxToRenx(erow *row, int cx);
+void edUpdateRow(erow *row);
+void edAppendRow(char *s, size_t len);
+
+/* File I/O */
+void edOpen(char *filename);
+
 /* Input */
+void edMoveCursor(int key);
 void edProcessKeypress(void);
 
 /* Output */
-
-void edDrawRows(struct abuf *);
+void edScroll(void);
+void edDrawRows(struct abuf *ab);
+void edDrawStatusBar(struct abuf *ab);
 void edRefreshScreen(void);
 
 #endif /* ASTE_H */

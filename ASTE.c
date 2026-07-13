@@ -5,14 +5,18 @@
 
 struct editorConfig E;
 
+
 /*Init*/
+
 void initEd() {
-    E.curx = E.cury = E.rowoff = E.nrows = 0; E.row = NULL;
+    E.curx = E.cury = E.renx = E.rowoff = E.coloff = E.nrows = 0; E.row = E.filename = NULL;
     if(getWindowSize(&E.screenrows, &E.screencols) == -1){ die("getWindowSize"); }
+    E.screenrows -= 1;
 }
 
 
 /*Terminal Helpers*/
+
 void die(const char * s){
     write(STDOUT_FILENO, "\x1b[2J", 4);
     write(STDOUT_FILENO, "\x1b[H", 3);
@@ -143,6 +147,39 @@ void abFree(struct abuf * ab){
 
 /* Row Operations */
 
+int edRowCurxToRenx(erow *row, int cx) {
+  int rx = 0;
+  for(register int i=0; i<cx; i++){
+    if(row->chars[i] == '\t'){
+        rx += (TAB_STOP - 1)  -  (rx % TAB_STOP);
+    }
+    rx++;
+  }
+  return rx;
+}
+
+void edUpdateRow(erow * row){
+    int tabs = 0;
+    for(register int j = 0; j < row->size; j++){
+        if(row->chars[j] == '\t'){ tabs++; }
+    }
+    free(row->render);
+    row->render = malloc(row->size + tabs*(TAB_STOP - 1) + 1);
+
+    int idx = 0;
+    for(register int i = 0; i< row->size; i++){
+        if(row->chars[i] == '\t'){
+            row->render[idx++] = ' ';
+            while(idx % TAB_STOP != 0){ row->render[idx++] = ' '; }
+        }
+        else{
+            row->render[idx++] = row->chars[i];
+        }
+    }
+    row->render[idx] = '\0';
+    row->rsize = idx;
+}
+
 void edAppendRow(char * s, size_t len){
     E.row = realloc(E.row, sizeof(erow) * (E.nrows + 1));
     int at = E.nrows;
@@ -150,6 +187,10 @@ void edAppendRow(char * s, size_t len){
     E.row[at].chars = malloc(sizeof(char) * (len + 1));
     memcpy(E.row[at].chars, s, len);
     E.row[at].chars[len] = '\0';
+
+    E.row[at].rsize = 0;
+    E.row[at].render = NULL;
+    edUpdateRow(&E.row[at]);
     E.nrows++;
 }
 
@@ -157,6 +198,8 @@ void edAppendRow(char * s, size_t len){
 /* File IO */
 
 void edOpen(char * filename){
+    free(E.filename);
+    E.filename = strdup(filename);
     FILE * fp = fopen(filename, "r");
     if(!fp){ die("fopen"); }
     char * line = NULL;
@@ -174,17 +217,26 @@ void edOpen(char * filename){
 
 /* Input */
 
-void edMoveCursor(int key) {
+void edMoveCursor(int key){
+    erow *row = (E.cury >= E.nrows) ? NULL : &E.row[E.cury];
   switch (key) {
     case ARROW_LEFT:
         if(E.curx != 0){
             E.curx--;
         }
+        else if(E.cury > 0){
+            E.cury--;
+            E.curx = E.row[E.cury].size;
+        }
         break;
     case ARROW_RIGHT:
-        if(E.curx != E.screencols - 1){
-            E.curx++;
-        }
+    if(row  &&  (E.curx < row->size)){
+        E.curx++;
+    }
+    else if(row  &&  (E.curx == row->size)){
+        E.cury++;
+        E.curx = 0;
+    }
         break;
     case ARROW_UP:
         if(E.cury != 0){
@@ -192,11 +244,16 @@ void edMoveCursor(int key) {
         }
         break;
     case ARROW_DOWN:
-        if(E.cury < E.screenrows){
+        if(E.cury < E.nrows){
             E.cury++;
         }
         break;
   }
+    row = (E.cury >= E.nrows) ? NULL : &E.row[E.cury];
+    int rowlen = row ? row->size : 0;
+    if(E.curx > rowlen){
+        E.curx = rowlen;
+    }
 }
 
 void edProcessKeypress(){
@@ -212,15 +269,26 @@ void edProcessKeypress(){
             E.curx = 0;
             break;
         case END_KEY:
-            E.curx = E.screencols - 1;
-            break;        
+            if(E.cury < E.nrows){
+                E.curx = E.row[E.cury].size;
+            }
+            break;     
 
         case PAGE_UP:
         case PAGE_DOWN:
         {
+            if(c == PAGE_UP){
+                E.cury = E.rowoff;
+            }
+            else if(c == PAGE_DOWN){
+                E.cury = E.rowoff + E.screenrows - 1;
+                if(E.cury > E.nrows){ E.cury = E.nrows; }
+            }
+
             int times = E.screenrows;
-            while (times--)
-            edMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+            while(times--){
+                edMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+            }
         }
         break;
         case ARROW_UP:
@@ -237,16 +305,27 @@ void edProcessKeypress(){
 /* output */
 
 void edScroll(){
+    E.renx = 0;
+    if(E.cury < E.nrows){
+        E.renx = edRowCurxToRenx(&E.row[E.cury], E.curx);
+    }
+
     if(E.cury < E.rowoff){
         E.rowoff = E.cury;
     }
     if(E.cury >= E.rowoff + E.screenrows){
-        E.rowoff = E.cury - E.screenrows - 1;
+        E.rowoff = E.cury - E.screenrows + 1;
+    }
+    if(E.renx < E.coloff){
+        E.coloff = E.renx;
+    }
+    if(E.renx >= E.coloff + E.screencols){
+        E.coloff = E.renx - E.screencols + 1;
     }
 }
 
 void edDrawRows(struct abuf * ab){
-    for(int i = 0; i < E.screenrows; i++){
+    for(register int i = 0; i < E.screenrows; i++){
         int filerow = i + E.rowoff;
         if(filerow >= E.nrows){
             if(E.nrows == 0  &&  i == E.screenrows / 3){
@@ -267,15 +346,35 @@ void edDrawRows(struct abuf * ab){
             }
         }
         else{
-            int len = E.row[filerow].size;
+            int len = E.row[filerow].rsize - E.coloff;
+            if (len < 0) len = 0;
             if(len > E.screencols) { len = E.screencols; }
-            abufAppend(ab, E.row[filerow].chars, len);
+            abAppend(ab, &E.row[filerow].render[E.coloff], len);
         }
+
         abufAppend(ab, "\x1b[K", 3);
-        if(i < E.screenrows - 1){
-            abufAppend(ab, "\r\n", 2);
+        abufAppend(ab, "\r\n", 2);
+    }
+}
+
+void edDrawStatusBar(struct abuf *ab) {
+    abAppend(ab, "\x1b[7m", 4);
+    char status[80], rstatus[80];
+    int len = snprintf(status, sizeof(status), "%.20s - %d lines", E.filename ? E.filename : "[No Name]", E.nrows);
+    int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d", E.cury + 1, E.nrows);
+    if (len > E.screencols) len = E.screencols;
+    abAppend(ab, status, len);
+    while(len < E.screencols){
+        if(E.screencols - len == rlen){
+            abAppend(ab, rstatus, rlen);
+            break;
+        }
+        else{
+            abAppend(ab, " ", 1);
+            len++;
         }
     }
+    abAppend(ab, "\x1b[m", 3);
 }
 
 void edRefreshScreen(){
@@ -286,9 +385,10 @@ void edRefreshScreen(){
     abufAppend(&ab, "\x1b[H", 3);
 
     edDrawRows(&ab);
+    edDrawStatusBar(&ab);
 
     char buf[32];
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cury + 1, E.curx + 1);
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cury-E.rowoff) + 1, (E.renx-E.coloff) + 1);
     abufAppend(&ab, buf, strlen(buf));
 
     abufAppend(&ab, "\x1b[?25h", 6);
