@@ -160,6 +160,19 @@ int edRowCurxToRenx(erow *row, int cx) {  // Convert curx to renx(because on ren
   return rx;
 }
 
+int edRowRenxToCurx(erow *row, int renx) {  // Convert renx back to curx(opposite of edRowCurxToRenx)
+  int cur_renx = 0;
+  int cx;
+  for(cx = 0; cx < row->size; cx++){
+    if(row->chars[cx] == '\t'){
+        cur_renx += (TAB_STOP - 1)  -  (cur_renx % TAB_STOP);
+    }
+    cur_renx++;
+    if(cur_renx > renx){ return cx; }
+  }
+  return cx;
+}
+
 void edUpdateRow(erow * row){  // create renderer, replace TAB with spaces for user
     int tabs = 0;
     for(register int j = 0; j < row->size; j++){
@@ -318,7 +331,7 @@ char * edRowsToString(int * bufferlen) {
 
 void edSave(){
   if(E.filename == NULL){
-    E.filename = edPrompt("Save as: %s (ESC to cancel)");
+    E.filename = edPrompt("Save as: %s (ESC to cancel)", NULL);
     if(E.filename == NULL){
       edSetStatusMessage("Save aborted");
       return;
@@ -344,9 +357,69 @@ void edSave(){
   edSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
 }
 
+/* Find */
+
+void edFindCallback(char * query, int key){  // runs after every keypress in the search prompt
+  static int last_match = -1;
+  static int direction = 1;
+
+  if(key == '\r'  ||  key == '\x1b'){
+    last_match = -1;
+    direction = 1;
+    return;
+  }
+  else if(key == ARROW_RIGHT  ||  key == ARROW_DOWN){
+    direction = 1;
+  }
+  else if(key == ARROW_LEFT  ||  key == ARROW_UP){
+    direction = -1;
+  }
+  else{
+    last_match = -1;
+    direction = 1;
+  }
+
+  if(last_match == -1){ direction = 1; }
+  int current = last_match;
+  for(register int i = 0; i < E.nrows; i++){
+    current += direction;
+    if(current == -1){ current = E.nrows - 1; }
+    else if(current == E.nrows){ current = 0; }
+
+    erow *row = &E.row[current];
+    char *match = strstr(row->render, query);
+    if(match){
+      last_match = current;
+      E.cury = current;
+      E.curx = edRowRenxToCurx(row, match - row->render);
+      E.rowoff = E.nrows;
+      break;
+    }
+  }
+}
+
+void edFind(){  // search prompt, restores cursor/scroll position if the search is cancelled
+  int saved_curx = E.curx;
+  int saved_cury = E.cury;
+  int saved_coloff = E.coloff;
+  int saved_rowoff = E.rowoff;
+
+  char * query = edPrompt("Search: %s (Use ESC/Arrows/Enter)", edFindCallback);
+
+  if(query){
+    free(query);
+  }
+  else{
+    E.curx = saved_curx;
+    E.cury = saved_cury;
+    E.coloff = saved_coloff;
+    E.rowoff = saved_rowoff;
+  }
+}
+
 /* Input */
 
-char * edPrompt(char * prompt){  // shows a prompt in the status bar and reads a line of input for it
+char * edPrompt(char * prompt, void (*callback)(char *, int)){  // shows a prompt in the status bar and reads a line of input for it
     size_t bufsize = 128;
     char * buf = malloc(bufsize);
     size_t buflen = 0;
@@ -362,12 +435,14 @@ char * edPrompt(char * prompt){  // shows a prompt in the status bar and reads a
         }
         else if(c == '\x1b'){
             edSetStatusMessage("");
+            if(callback){ callback(buf, c); }
             free(buf);
             return NULL;
         }
         else if(c == '\r'){
             if(buflen != 0){
                 edSetStatusMessage("");
+                if(callback){ callback(buf, c); }
                 return buf;
             }
         }
@@ -379,6 +454,8 @@ char * edPrompt(char * prompt){  // shows a prompt in the status bar and reads a
             buf[buflen++] = c;
             buf[buflen] = '\0';
         }
+
+        if(callback){ callback(buf, c); }
     }
 }
 
@@ -454,6 +531,10 @@ void edProcessKeypress(){
                 E.curx = E.row[E.cury].size;
             }
             break;  
+
+        case CTRL_KEY('f'):
+            edFind();
+            break;
 
         case BACKSPACE:
         case CTRL_KEY('h'):
@@ -623,7 +704,7 @@ int main(int argc, char * argv[]){
         edOpen(argv[1]);
     }
 
-    edSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit");
+    edSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
 
     while(1){
         edRefreshScreen();

@@ -86,6 +86,7 @@ void abFree(struct abuf * ab);
 
 /* Row operations */
 int edRowCurxToRenx(erow * row, int cx);
+int edRowRenxToCurx(erow * row, int renx);
 void edUpdateRow(erow * row);
 void edInsertRow(int at, char * s, size_t len);
 void edFreeRow(erow * row);
@@ -104,8 +105,12 @@ void edOpen(char * filename);
 char *edRowsToString(int * bufferlen);
 void edSave(void);
 
+/* Find */
+void edFindCallback(char * query, int key);
+void edFind(void);
+
 /* Input */
-char *edPrompt(char * prompt);
+char * edPrompt(char * prompt, void (*callback)(char *, int));
 void edMoveCursor(int key);
 void edProcessKeypress(void);
 
