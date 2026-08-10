@@ -37,11 +37,38 @@ enum editorKey {
   BACKSPACE = 127
 };
 
+enum editorHighlight{
+  HL_NORMAL = 0,
+  HL_COMMENT,
+  HL_MLCOMMENT,
+  HL_KEYWORD1,
+  HL_KEYWORD2,
+  HL_STRING,
+  HL_NUMBER,
+  HL_MATCH
+};
+
+#define HL_HIGHLIGHT_NUMBERS (1<<0)
+#define HL_HIGHLIGHT_STRINGS (1<<1)
+
+struct editorSyntax{
+    char * filetype;
+    char ** filematch;
+    char ** keywords;
+    char * singleline_comment_start;
+    char * multiline_comment_start;
+    char * multiline_comment_end;
+    int flags;
+};
+
 typedef struct erow{  // Contains a row of text
+    int idx;
     int size;
     int rsize;
     char * chars;
     char * render;
+    unsigned char * hl;
+    int hl_open_comment;
 } erow;
 
 struct editorConfig{
@@ -57,6 +84,7 @@ struct editorConfig{
     char * filename;
     char statusmsg[80];
     time_t statusmsg_time;
+    struct editorSyntax * syntax;
     struct termios orig_term;
 };
 
@@ -84,6 +112,12 @@ int getWindowSize(int * rows, int * cols);
 void abufAppend(struct abuf * ab, const char * s, int len);
 void abFree(struct abuf * ab);
 
+/* Syntax Highlighting */
+int is_separator(int c);
+void edUpdateSyntax(erow * row);
+int edSyntaxToColor(int hl);
+void edSelectSyntaxHighlight(void);
+
 /* Row operations */
 int edRowCurxToRenx(erow * row, int cx);
 int edRowRenxToCurx(erow * row, int renx);
@@ -110,7 +144,7 @@ void edFindCallback(char * query, int key);
 void edFind(void);
 
 /* Input */
-char * edPrompt(char * prompt, void (*callback)(char *, int));
+char *edPrompt(char * prompt, void (*callback)(char *, int));
 void edMoveCursor(int key);
 void edProcessKeypress(void);
 
