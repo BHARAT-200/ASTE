@@ -33,6 +33,8 @@ void initEd() {
     E.curx = E.cury = E.renx = E.rowoff = E.coloff = E.nrows = E.statusmsg_time = E.dirty = 0;
     E.row = NULL; E.filename = NULL;
     E.statusmsg[0] = '\0';
+    E.syntax = NULL;
+    E.brRow1 = E.brCol1 = E.brRow2 = E.brCol2 = -1;
     if(getWindowSize(&E.screenrows, &E.screencols) == -1){ die("getWindowSize"); }
     E.screenrows -= 2;
 }
@@ -172,13 +174,17 @@ void abFree(struct abuf * ab){
 
 /* Syntax Highlighting */
 
+int edIsCFile(){  // true when the current file's syntax is C/C++, per E.syntax
+  return E.syntax != NULL  &&  !strcmp(E.syntax->filetype, "c");
+}
+
 int is_separator(int c){
   return isspace(c)  ||  c == '\0'  ||  strchr(",.()+-/*=~%<>[];", c) != NULL;
 }
 
 void edUpdateSyntax(erow * row){
   row->hl = realloc(row->hl, row->rsize);
-  memset(row->hl, HL_NORMAL, row->rsize);
+  if(row->rsize > 0){ memset(row->hl, HL_NORMAL, row->rsize); }  // realloc(...,0) may return NULL; nothing to fill anyway
 
   if(E.syntax == NULL){ return; }
 
@@ -446,12 +452,133 @@ void edRowDelChar(erow * row, int at){
   E.dirty++;
 }
 
+/* Bracket Matching */
+
+int edIsOpenBracket(char c){  // true if c is an opening bracket character
+  return c == '('  ||  c == '['  ||  c == '{';
+}
+
+int edIsCloseBracket(char c){  // true if c is a closing bracket character
+  return c == ')'  ||  c == ']'  ||  c == '}';
+}
+
+char edMatchingBracket(char c){  // returns the bracket character that pairs with c
+  switch(c){
+    case '(': return ')';
+    case ')': return '(';
+    case '[': return ']';
+    case ']': return '[';
+    case '{': return '}';
+    case '}': return '{';
+  }
+  return '\0';
+}
+
+int edIsRealBracketAt(erow * row, int cx){  // true if row->chars[cx] is a bracket that isn't inside a string/comment
+  if(row == NULL  ||  cx < 0  ||  cx >= row->size){ return 0; }
+  char c = row->chars[cx];
+  if(!edIsOpenBracket(c)  &&  !edIsCloseBracket(c)){ return 0; }
+  if(row->hl == NULL){ return 1; }
+
+  int renx = edRowCurxToRenx(row, cx);
+  if(renx < 0  ||  renx >= row->rsize){ return 1; }
+
+  unsigned char h = row->hl[renx];
+  return !(h == HL_STRING  ||  h == HL_COMMENT  ||  h == HL_MLCOMMENT);
+}
+
+void edFindMatchingBracket(){  // recomputes which bracket pair (if any) near the cursor should be highlighted
+  E.brRow1 = -1; E.brCol1 = -1; E.brRow2 = -1; E.brCol2 = -1;
+  if(!edIsCFile()  ||  E.cury >= E.nrows){ return; }
+
+  erow *row = &E.row[E.cury];
+  int cx = -1;
+  if(E.curx < row->size  &&  edIsRealBracketAt(row, E.curx)){ cx = E.curx; }
+  else if(E.curx > 0  &&  edIsRealBracketAt(row, E.curx - 1)){ cx = E.curx - 1; }
+  if(cx == -1){ return; }
+
+  char c = row->chars[cx];
+  char want = edMatchingBracket(c);
+  E.brRow1 = E.cury;
+  E.brCol1 = cx;
+
+  int depth = 1;
+  if(edIsOpenBracket(c)){
+    int ry = E.cury, rx = cx + 1;
+    while(ry < E.nrows){
+      erow *r = &E.row[ry];
+      while(rx < r->size){
+        if(edIsRealBracketAt(r, rx)){
+          if(r->chars[rx] == c){ depth++; }
+          else if(r->chars[rx] == want  &&  --depth == 0){
+            E.brRow2 = ry; E.brCol2 = rx;
+            return;
+          }
+        }
+        rx++;
+      }
+      ry++;
+      rx = 0;
+    }
+  }
+  else{
+    int ry = E.cury, rx = cx - 1;
+    while(ry >= 0){
+      erow *r = &E.row[ry];
+      while(rx >= 0){
+        if(edIsRealBracketAt(r, rx)){
+          if(r->chars[rx] == c){ depth++; }
+          else if(r->chars[rx] == want  &&  --depth == 0){
+            E.brRow2 = ry; E.brCol2 = rx;
+            return;
+          }
+        }
+        rx--;
+      }
+      ry--;
+      if(ry >= 0){ rx = E.row[ry].size - 1; }
+    }
+  }
+}
+
 /* Editor operations */
 
+void edAutoOutdentOnCloseBracket(int c){  // removes one indent level when a closing bracket is typed as the first char on a line
+  if(!edIsCloseBracket(c)){ return; }
+  if(!edIsCFile()  ||  E.cury >= E.nrows){ return; }
+
+  erow *row = &E.row[E.cury];
+  for(register int i = 0; i < E.curx; i++){
+    if(row->chars[i] != ' '  &&  row->chars[i] != '\t'){ return; }  // something other than whitespace precedes the cursor
+  }
+  if(E.curx == 0){ return; }
+
+  edRowDelChar(row, E.curx - 1);
+  E.curx--;
+}
+
+void edCheckAsciHelpCommand(){  // if the text just typed spells /ASCI_HELP, removes it and shows the help screen instead
+  const char *cmd = "/ASCI_HELP";
+  int cmdlen = strlen(cmd);
+  if(E.cury >= E.nrows){ return; }
+
+  erow *row = &E.row[E.cury];
+  if(E.curx < cmdlen){ return; }
+  if(strncmp(&row->chars[E.curx - cmdlen], cmd, cmdlen) != 0){ return; }
+
+  for(register int i = 0; i < cmdlen; i++){
+    edRowDelChar(row, E.curx - 1);
+    E.curx--;
+  }
+  edShowHelp();
+}
+
 void edInsertChar(int c){
+  edAutoOutdentOnCloseBracket(c);  // auto-dedent one level if this closing bracket starts the line
   if (E.cury == E.nrows){ edInsertRow(E.nrows, "", 0); }
   edRowInsertChar(&E.row[E.cury], E.curx, c);
   E.curx++;
+  edCheckAsciHelpCommand();  // recognize /ASCI_HELP as a command rather than literal text
 }
 
 void edDelChar(){  // backspaces the character to the left of the cursor
@@ -471,7 +598,30 @@ void edDelChar(){  // backspaces the character to the left of the cursor
   }
 }
 
-void edInsertNewline(){  // handles the Enter key: splits the current row at the cursor
+void edInsertNewline(){  // handles the Enter key: splits the current row at the cursor, auto-indenting for C/C++ files
+  char indent[256];       // leading whitespace copied from the line being split
+  int indent_len = 0;
+  int opens = 0;           // true if a real open bracket sits just before the cursor
+  int closes = 0;          // true if a real close bracket sits at/after the cursor (only whitespace between)
+
+  if(edIsCFile()  &&  E.cury < E.nrows){
+    erow *cur = &E.row[E.cury];
+
+    while(indent_len < cur->size  &&  indent_len < (int)sizeof(indent) - 2  &&
+          (cur->chars[indent_len] == ' '  ||  cur->chars[indent_len] == '\t')){
+      indent[indent_len] = cur->chars[indent_len];
+      indent_len++;
+    }
+
+    int j = E.curx - 1;
+    while(j >= 0  &&  (cur->chars[j] == ' '  ||  cur->chars[j] == '\t')){ j--; }
+    if(j >= 0  &&  edIsOpenBracket(cur->chars[j])  &&  edIsRealBracketAt(cur, j)){ opens = 1; }
+
+    int k = E.curx;
+    while(k < cur->size  &&  (cur->chars[k] == ' '  ||  cur->chars[k] == '\t')){ k++; }
+    if(k < cur->size  &&  edIsCloseBracket(cur->chars[k])  &&  edIsRealBracketAt(cur, k)){ closes = 1; }
+  }
+
   if(E.curx == 0){
     edInsertRow(E.cury, "", 0);
   }
@@ -485,6 +635,24 @@ void edInsertNewline(){  // handles the Enter key: splits the current row at the
   }
   E.cury++;
   E.curx = 0;
+
+  if(opens  &&  closes){
+    // cursor sat directly between an empty pair, e.g. "{|}" -- give the closing bracket its own line
+    edInsertRow(E.cury, "", 0);
+    for(register int i = 0; i < indent_len; i++){ edRowInsertChar(&E.row[E.cury + 1], i, indent[i]); }
+    for(register int i = 0; i < indent_len; i++){ edInsertChar(indent[i]); }
+    edInsertChar('\t');
+  }
+  else if(opens){
+    for(register int i = 0; i < indent_len; i++){ edInsertChar(indent[i]); }
+    edInsertChar('\t');
+  }
+  else if(closes  &&  indent_len > 0){
+    for(register int i = 0; i < indent_len - 1; i++){ edInsertChar(indent[i]); }
+  }
+  else{
+    for(register int i = 0; i < indent_len; i++){ edInsertChar(indent[i]); }
+  }
 }
 
 /* File IO */
@@ -625,6 +793,81 @@ void edFind(){  // search prompt, restores cursor/scroll position if the search 
   }
 }
 
+/* Go To Line */
+
+void edGoToLine(){  // Ctrl-G: prompts for a line number and jumps the cursor there, preserving column and centering the view
+  char * input = edPrompt("Go to line: %s", NULL);
+  if(input == NULL){ return; }
+  if(E.nrows == 0){ free(input); return; }
+
+  int line = atoi(input);
+  free(input);
+  if(line < 1){ line = 1; }
+  if(line > E.nrows){ line = E.nrows; }
+
+  E.cury = line - 1;
+  if(E.curx > E.row[E.cury].size){ E.curx = E.row[E.cury].size; }
+
+  E.rowoff = E.cury - (E.screenrows / 2);
+  if(E.rowoff < 0){ E.rowoff = 0; }
+}
+
+/* Help */
+
+void edShowHelp(){  // displays a temporary full-screen help view; returns to the editor on ESC or 'q' without touching the file
+  struct abuf ab = ABUF_INIT;
+  abufAppend(&ab, "\x1b[?25l", 6);
+  abufAppend(&ab, "\x1b[H", 3);
+  abufAppend(&ab, "\x1b[2J", 4);
+
+  const char * lines[] = {
+    "ASTE - A Small Text Editor",
+    "----------------------------------------",
+    "",
+    "Navigation",
+    "  Arrow Keys       Move cursor",
+    "  Home             Start of line",
+    "  End              End of line",
+    "  Page Up          Move one page up",
+    "  Page Down        Move one page down",
+    "  Ctrl-G           Go to line",
+    "",
+    "Editing",
+    "  Enter            Insert new line (auto-indents in C/C++ files)",
+    "  Backspace        Delete previous character",
+    "  Delete           Delete next character",
+    "",
+    "File",
+    "  Ctrl-S           Save file",
+    "  Ctrl-Q           Quit",
+    "",
+    "Search",
+    "  Ctrl-F           Find text",
+    "",
+    "Help",
+    "  /ASCI_HELP       Show this help",
+    "",
+    "Press ESC or q to return to the editor",
+    NULL
+  };
+
+  for(register int i = 0; lines[i] != NULL  &&  i < E.screenrows; i++){
+    abufAppend(&ab, lines[i], strlen(lines[i]));
+    abufAppend(&ab, "\x1b[K", 3);
+    abufAppend(&ab, "\r\n", 2);
+  }
+
+  write(STDOUT_FILENO, ab.b, ab.len);
+  abFree(&ab);
+
+  int c;
+  do{
+    c = edReadKey();
+  } while(c != '\x1b'  &&  c != 'q');
+
+  edRefreshScreen();  // redraw the normal editor exactly where the user left off
+}
+
 /* Input */
 
 char * edPrompt(char * prompt, void (*callback)(char *, int)){  // shows a prompt in the status bar and reads a line of input for it
@@ -744,6 +987,10 @@ void edProcessKeypress(){
             edFind();
             break;
 
+        case CTRL_KEY('g'):
+            edGoToLine();
+            break;
+
         case BACKSPACE:
         case CTRL_KEY('h'):
         case DEL_KEY:
@@ -789,7 +1036,30 @@ void edProcessKeypress(){
 
 /* output */
 
+int edLineNumWidth(){  // digit width needed to display E.nrows as a line number (never smaller than 1)
+    int n = E.nrows;
+    int width = 1;
+    while(n >= 10){ n /= 10; width++; }
+    return width;
+}
+
+void edDrawLineNumber(struct abuf * ab, int filerow, int numwidth){  // draws the left-hand gutter for one screen row (blank past EOF)
+    char buf[32];
+    int len;
+    abufAppend(ab, "\x1b[90m", 5);
+    if(filerow < E.nrows){
+        len = snprintf(buf, sizeof(buf), "%*d ", numwidth, filerow + 1);
+    }
+    else{
+        len = snprintf(buf, sizeof(buf), "%*s ", numwidth, "");
+    }
+    abufAppend(ab, buf, len);
+    abufAppend(ab, "\x1b[39m", 5);
+}
+
 void edScroll(){  // handles offsets when cursor is moved
+    edFindMatchingBracket();  // recompute the active bracket-match pair for the new cursor position
+
     E.renx = 0;
     if(E.cury < E.nrows){
         E.renx = edRowCurxToRenx(&E.row[E.cury], E.curx);
@@ -801,23 +1071,33 @@ void edScroll(){  // handles offsets when cursor is moved
     if(E.cury >= E.rowoff + E.screenrows){
         E.rowoff = E.cury - E.screenrows + 1;
     }
+
+    int content_cols = E.screencols - (edLineNumWidth() + 1);  // the gutter eats into the visible content width
+    if(content_cols < 1){ content_cols = 1; }
+
     if(E.renx < E.coloff){
         E.coloff = E.renx;
     }
-    if(E.renx >= E.coloff + E.screencols){
-        E.coloff = E.renx - E.screencols + 1;
+    if(E.renx >= E.coloff + content_cols){
+        E.coloff = E.renx - content_cols + 1;
     }
 }
 
 void edDrawRows(struct abuf * ab){
+    int numwidth = edLineNumWidth();   // digit width recalculated each frame since E.nrows can change
+    int gutter = numwidth + 1;         // digits + one trailing space
     for(register int i = 0; i < E.screenrows; i++){
         int filerow = i + E.rowoff;
+        edDrawLineNumber(ab, filerow, numwidth);
+        int content_cols = E.screencols - gutter;
+        if(content_cols < 0){ content_cols = 0; }
+
         if(filerow >= E.nrows){
             if(E.nrows == 0  &&  i == E.screenrows / 3){
             char welcome[80];
             int welcomelen = snprintf(welcome, sizeof(welcome), "ASTE - A Small Text Editor");
-            if(welcomelen > E.screencols){ welcomelen = E.screencols; }
-            int padding = (E.screencols - welcomelen) / 2;
+            if(welcomelen > content_cols){ welcomelen = content_cols; }
+            int padding = (content_cols - welcomelen) / 2;
             if(padding){
                 abufAppend(ab, "~", 1);
                 padding--;
@@ -833,11 +1113,25 @@ void edDrawRows(struct abuf * ab){
         else{
             int len = E.row[filerow].rsize - E.coloff;
             if (len < 0) len = 0;
-            if(len > E.screencols) { len = E.screencols; }
+            if(len > content_cols) { len = content_cols; }
             char * c = &E.row[filerow].render[E.coloff];
             unsigned char * hl = &E.row[filerow].hl[E.coloff];
             int current_color = -1;
+
+            int br1_renx = (filerow == E.brRow1) ? edRowCurxToRenx(&E.row[filerow], E.brCol1) : -1;
+            int br2_renx = (filerow == E.brRow2) ? edRowCurxToRenx(&E.row[filerow], E.brCol2) : -1;
+
             for(register int j = 0; j < len; j++){
+                int abscol = j + E.coloff;
+                if(abscol == br1_renx  ||  abscol == br2_renx){
+                    // bracket-match overlay: bold+reverse for a matched pair, plus red if the bracket has no partner
+                    if(E.brRow2 == -1){ abufAppend(ab, "\x1b[1;7;31m", 9); }
+                    else{ abufAppend(ab, "\x1b[1;7m", 6); }
+                    abufAppend(ab, &c[j], 1);
+                    abufAppend(ab, "\x1b[m", 3);
+                    current_color = -1;
+                    continue;
+                }
                 if(iscntrl(c[j])){
                     char sym = (c[j] <= 26) ? '@' + c[j] : '?';
                     abufAppend(ab, "\x1b[7m", 4);
@@ -908,7 +1202,8 @@ void edRefreshScreen(){
     edDrawMessageBar(&ab);
 
     char buf[32];
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cury-E.rowoff) + 1, (E.renx-E.coloff) + 1);
+    int gutter = edLineNumWidth() + 1;
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cury-E.rowoff) + 1, (E.renx-E.coloff) + 1 + gutter);
     abufAppend(&ab, buf, strlen(buf));
 
     abufAppend(&ab, "\x1b[?25h", 6);
@@ -945,7 +1240,7 @@ int main(int argc, char * argv[]){
         edOpen(argv[1]);
     }
 
-    edSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
+    edSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find | Ctrl-G = go to line | /ASCI_HELP = help");
 
     while(1){
         edRefreshScreen();

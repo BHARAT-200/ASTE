@@ -85,6 +85,8 @@ struct editorConfig{
     char statusmsg[80];
     time_t statusmsg_time;
     struct editorSyntax * syntax;
+    int brRow1, brCol1;  // chars-index position of one bracket in the pair currently matched near the cursor (-1 if none)
+    int brRow2, brCol2;  // chars-index position of its matching bracket (-1 if the first bracket has no match)
     struct termios orig_term;
 };
 
@@ -113,6 +115,7 @@ void abufAppend(struct abuf * ab, const char * s, int len);
 void abFree(struct abuf * ab);
 
 /* Syntax Highlighting */
+int edIsCFile(void);
 int is_separator(int c);
 void edUpdateSyntax(erow * row);
 int edSyntaxToColor(int hl);
@@ -129,7 +132,16 @@ void edRowInsertChar(erow *row, int at, int c);
 void edRowAppendString(erow * row, char * s, size_t len);
 void edRowDelChar(erow * row, int at);
 
+/* Bracket Matching */
+int edIsOpenBracket(char c);
+int edIsCloseBracket(char c);
+char edMatchingBracket(char c);
+int edIsRealBracketAt(erow * row, int cx);
+void edFindMatchingBracket(void);
+
 /* Editor operations */
+void edAutoOutdentOnCloseBracket(int c);
+void edCheckAsciHelpCommand(void);
 void edInsertChar(int c);
 void edDelChar(void);
 void edInsertNewline(void);
@@ -143,12 +155,20 @@ void edSave(void);
 void edFindCallback(char * query, int key);
 void edFind(void);
 
+/* Go To Line */
+void edGoToLine(void);
+
+/* Help */
+void edShowHelp(void);
+
 /* Input */
 char *edPrompt(char * prompt, void (*callback)(char *, int));
 void edMoveCursor(int key);
 void edProcessKeypress(void);
 
 /* Output */
+int edLineNumWidth(void);
+void edDrawLineNumber(struct abuf * ab, int filerow, int numwidth);
 void edScroll(void);
 void edDrawRows(struct abuf * ab);
 void edDrawStatusBar(struct abuf * ab);
