@@ -147,9 +147,12 @@ void edDelChar(void);
 void edInsertNewline(void);
 
 /* File I/O */
+void edFreeAllRows(void);
+void edLoadFileRows(FILE * fp);
 void edOpen(char * filename);
 char *edRowsToString(int * bufferlen);
 void edSave(void);
+void edOpenFile(void);
 
 /* Find */
 void edFindCallback(char * query, int key);

@@ -657,12 +657,16 @@ void edInsertNewline(){  // handles the Enter key: splits the current row at the
 
 /* File IO */
 
-void edOpen(char * filename){  // open a file and start adding rows to editorconfig
-    free(E.filename);
-    E.filename = strdup(filename);
-    edSelectSyntaxHighlight();
-    FILE * fp = fopen(filename, "r");
-    if(!fp){ die("fopen"); }
+void edFreeAllRows(){  // frees every row's memory and resets E.row/E.nrows back to empty
+    for(register int i = 0; i < E.nrows; i++){
+        edFreeRow(&E.row[i]);
+    }
+    free(E.row);
+    E.row = NULL;
+    E.nrows = 0;
+}
+
+void edLoadFileRows(FILE * fp){  // reads every line from an already-open stream, appending rows to E.row
     char * line = NULL;
     size_t linecap = 0;
     ssize_t llen;
@@ -672,7 +676,17 @@ void edOpen(char * filename){  // open a file and start adding rows to editorcon
         }
         edInsertRow(E.nrows, line, llen);
     }
-    free(line); fclose(fp);
+    free(line);
+}
+
+void edOpen(char * filename){  // open a file and start adding rows to editorconfig
+    free(E.filename);
+    E.filename = strdup(filename);
+    edSelectSyntaxHighlight();
+    FILE * fp = fopen(filename, "r");
+    if(!fp){ die("fopen"); }
+    edLoadFileRows(fp);
+    fclose(fp);
     E.dirty = 0;
 }
 
@@ -718,6 +732,42 @@ void edSave(){
   }
   free(buf);
   edSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
+}
+
+void edOpenFile(){  // Ctrl-O: prompts for a filename and replaces the current buffer with that file's contents
+  if(E.dirty){
+    char * confirm = edPrompt("Unsaved changes. Open anyway? (y/n): %s", NULL);
+    if(confirm == NULL){ edSetStatusMessage("Open cancelled"); return; }
+    int ok = (confirm[0] == 'y'  ||  confirm[0] == 'Y');
+    free(confirm);
+    if(!ok){ edSetStatusMessage("Open cancelled"); return; }
+  }
+
+  char * filename = edPrompt("Open file: %s (ESC to cancel)", NULL);
+  if(filename == NULL){ return; }
+
+  FILE * fp = fopen(filename, "r");  // test-open the new file BEFORE touching the current buffer
+  if(!fp){
+    edSetStatusMessage("Can't open file: %s", strerror(errno));
+    free(filename);
+    return;
+  }
+
+  edFreeAllRows();
+  E.curx = 0;
+  E.cury = 0;
+  E.rowoff = 0;
+  E.coloff = 0;
+
+  free(E.filename);
+  E.filename = filename;  // edPrompt already handed us an owned, malloc'd string -- take it as-is
+
+  edLoadFileRows(fp);
+  fclose(fp);
+
+  E.dirty = 0;
+  edSelectSyntaxHighlight();  // pick highlighting for the new extension; bracket matching follows automatically next edScroll
+  edSetStatusMessage("Opened \"%s\"", E.filename);
 }
 
 /* Find */
@@ -838,6 +888,7 @@ void edShowHelp(){  // displays a temporary full-screen help view; returns to th
     "  Delete           Delete next character",
     "",
     "File",
+    "  Ctrl-O           Open file",
     "  Ctrl-S           Save file",
     "  Ctrl-Q           Quit",
     "",
@@ -972,6 +1023,10 @@ void edProcessKeypress(){
         
         case CTRL_KEY('s'):
             edSave();
+            break;
+
+        case CTRL_KEY('o'):
+            edOpenFile();
             break;
 
         case HOME_KEY:
@@ -1240,7 +1295,7 @@ int main(int argc, char * argv[]){
         edOpen(argv[1]);
     }
 
-    edSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find | Ctrl-G = go to line | /ASCI_HELP = help");
+    edSetStatusMessage("HELP: Ctrl-O = open | Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find | Ctrl-G = go to line | /ASCI_HELP = help");
 
     while(1){
         edRefreshScreen();
