@@ -734,7 +734,445 @@ void edSave(){
   edSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
 }
 
+/* edWriteToFile: shared disk-write helper used by both normal and RCEX save.
+ * Opens (creating if needed), truncates, then writes exactly datalen bytes.
+ * Returns 0 on success, -1 on any error (errno is set). */
+int edWriteToFile(const char *filename, const unsigned char *data, int datalen){
+    int fd = open(filename, O_RDWR | O_CREAT, 0644);
+    if(fd == -1){ return -1; }
+    if(ftruncate(fd, datalen) == -1){ close(fd); return -1; }
+
+    /* Handle partial writes */
+    int total = 0;
+    while(total < datalen){
+        ssize_t n = write(fd, data + total, (size_t)(datalen - total));
+        if(n <= 0){ close(fd); return -1; }
+        total += (int)n;
+    }
+    close(fd);
+    return 0;
+}
+
+/* edPromptKey: reads a key/password from the status bar.
+ * Characters are shown as '*' to avoid leaking the key on screen.
+ * Returns a newly malloc'd NUL-terminated string the caller must free,
+ * or NULL if the user pressed ESC (cancelled).
+ * The returned string is zeroed before freeing by edSaveRCEX – do not
+ * free it through any other path without wiping first. */
+char *edPromptKey(const char *prompt_label){
+    size_t bufsize = 128;
+    char *buf  = malloc(bufsize);
+    char *mask = malloc(bufsize);  /* same-length '*' string for display */
+    if(!buf || !mask){
+        free(buf); free(mask);
+        return NULL;
+    }
+
+    size_t buflen = 0;
+    buf[0] = mask[0] = '\0';
+
+    while(1){
+        /* Show stars in the status bar, never the key text */
+        edSetStatusMessage("%s %s", prompt_label, mask);
+        edRefreshScreen();
+
+        int c = edReadKey();
+
+        if(c == DEL_KEY || c == CTRL_KEY('h') || c == BACKSPACE){
+            if(buflen > 0){
+                buf[--buflen]  = '\0';
+                mask[buflen]   = '\0';
+            }
+        }
+        else if(c == '\x1b'){
+            /* ESC → cancel; wipe whatever was typed */
+            memset(buf, 0, bufsize);
+            free(buf); free(mask);
+            edSetStatusMessage("");
+            return NULL;
+        }
+        else if(c == '\r'){
+            if(buflen > 0){
+                free(mask);
+                edSetStatusMessage("");
+                return buf;   /* caller owns buf; caller must wipe+free */
+            }
+            /* empty key → force the user to type something */
+        }
+        else if(!iscntrl(c) && c < 128){
+            if(buflen == bufsize - 1){
+                bufsize *= 2;
+                buf  = realloc(buf,  bufsize);
+                mask = realloc(mask, bufsize);
+                if(!buf || !mask){
+                    free(buf); free(mask);
+                    return NULL;
+                }
+            }
+            buf[buflen]  = (char)c;
+            mask[buflen] = '*';
+            buflen++;
+            buf[buflen] = mask[buflen] = '\0';
+        }
+        /* ignore all other keys (arrows, function keys, etc.) */
+    }
+}
+
+/* edSaveRCEX: encrypts the current editor buffer with RCEX and writes:
+ *   [ nonce (RCEX_NONCE_LEN bytes) ][ MAC tag (MACLEN bytes) ][ ciphertext ]
+ * to the user-chosen output file.
+ * The nonce is randomly generated per-save via rcexrandbytes().
+ * The key is collected via edPromptKey() (masked) and immediately wiped
+ * after the Rcex context has been initialised.
+ * E.dirty is cleared only on full success. */
+void edSaveRCEX(void){
+    /* ---- 1. Ask where to save ---- */
+    char default_name[512];
+    if(E.filename){
+        snprintf(default_name, sizeof(default_name), "%s.rcex", E.filename);
+    } else {
+        snprintf(default_name, sizeof(default_name), "untitled.rcex");
+    }
+
+    char prompt[640];
+    snprintf(prompt, sizeof(prompt), "Save encrypted file as: %%s");
+    char *outname = edPrompt(prompt, NULL);
+    if(!outname){
+        edSetStatusMessage("RCEX save cancelled");
+        return;
+    }
+    if(outname[0] == '\0'){
+        free(outname);
+        outname = strdup(default_name);
+    }
+
+    /* ---- 2. Collect the encryption key (masked) ---- */
+    char *key = edPromptKey("RCEX Key:");
+    if(!key){
+        free(outname);
+        edSetStatusMessage("RCEX save cancelled");
+        return;
+    }
+
+    int16 keylen = (int16)strlen(key);
+    if(!rcexvalidate((int8 *)key, keylen)){
+        memset(key, 0, (size_t)keylen);
+        free(key);
+        free(outname);
+        edSetStatusMessage("RCEX encryption failed: invalid key");
+        return;
+    }
+
+    /* ---- 3. Build plaintext from editor rows ---- */
+    int ptlen = 0;
+    char *plaintext = edRowsToString(&ptlen);
+    if(!plaintext){
+        memset(key, 0, (size_t)keylen);
+        free(key);
+        free(outname);
+        edSetStatusMessage("RCEX encryption failed: out of memory");
+        return;
+    }
+
+    /* ---- 4. Generate a fresh random nonce ---- */
+    int8 nonce[RCEX_NONCE_LEN];
+    if(rcexrandbytes(nonce, RCEX_NONCE_LEN) != RCEX_NONCE_LEN){
+        free(plaintext);
+        memset(key, 0, (size_t)keylen);
+        free(key);
+        free(outname);
+        edSetStatusMessage("RCEX encryption failed: nonce generation error");
+        return;
+    }
+
+    /* ---- 5. Initialise RCEX cipher context (key + nonce) ---- */
+    Rcex *ctx = rcexinit_nonce((int8 *)key, keylen, nonce, RCEX_NONCE_LEN);
+    if(!ctx){
+        free(plaintext);
+        memset(key, 0, (size_t)keylen);
+        free(key);
+        free(outname);
+        edSetStatusMessage("RCEX encryption failed: context init error");
+        return;
+    }
+
+    /* ---- 6. Encrypt ---- */
+    int8 *ciphertext = rcexencrypt(ctx, (int8 *)plaintext, (int16)ptlen);
+    rcexwipe(ctx);      /* wipe & free the cipher context immediately */
+    free(plaintext);
+    plaintext = NULL;
+
+    if(!ciphertext){
+        memset(key, 0, (size_t)keylen);
+        free(key);
+        free(outname);
+        edSetStatusMessage("RCEX encryption failed");
+        return;
+    }
+
+    /* ---- 7. Compute MAC keyed on key || nonce ----
+     * mac_key = key bytes followed by nonce bytes.
+     * This binds the MAC to the cipher key so that a wrong decryption key
+     * will produce a different mac_key → different MAC → MAC mismatch
+     * detected before any decrypted bytes are loaded into the editor. */
+    int8 mac[MACLEN];
+    {
+        int16 mklen   = keylen + (int16)RCEX_NONCE_LEN;
+        int8 *mac_key = malloc((size_t)mklen);
+        if(!mac_key){
+            free(ciphertext);
+            memset(key, 0, (size_t)keylen);
+            free(key);
+            free(outname);
+            edSetStatusMessage("RCEX encryption failed: out of memory");
+            return;
+        }
+        memcpy(mac_key,         key,   keylen);
+        memcpy(mac_key + keylen, nonce, RCEX_NONCE_LEN);
+        rcexmac(mac_key, mklen, ciphertext, (int16)ptlen, mac);
+        memset(mac_key, 0, (size_t)mklen);
+        free(mac_key);
+    }
+
+    /* Wipe the user key — no longer needed */
+    memset(key, 0, (size_t)keylen);
+    free(key);
+    key = NULL;
+
+    /* ---- 8. Assemble output buffer: nonce | MAC | ciphertext ---- */
+    int outlen = RCEX_NONCE_LEN + MACLEN + ptlen;
+    unsigned char *outbuf = malloc((size_t)outlen);
+    if(!outbuf){
+        free(ciphertext);
+        free(outname);
+        edSetStatusMessage("RCEX encryption failed: out of memory");
+        return;
+    }
+    memcpy(outbuf,                            nonce,      RCEX_NONCE_LEN);
+    memcpy(outbuf + RCEX_NONCE_LEN,           mac,        MACLEN);
+    memcpy(outbuf + RCEX_NONCE_LEN + MACLEN,  ciphertext, ptlen);
+
+    free(ciphertext);
+    ciphertext = NULL;
+
+    /* ---- 9. Write to disk ---- */
+    if(edWriteToFile(outname, outbuf, outlen) == 0){
+        memset(outbuf, 0, (size_t)outlen);
+        free(outbuf);
+        E.dirty = 0;
+        edSetStatusMessage("File encrypted and saved using RCEX: %s (%d bytes)", outname, outlen);
+    } else {
+        memset(outbuf, 0, (size_t)outlen);
+        free(outbuf);
+        edSetStatusMessage("RCEX encryption failed: I/O error: %s", strerror(errno));
+    }
+
+    free(outname);
+}
+
+/* edSaveOptions: intercepts Ctrl-S and presents a one-key menu:
+ *   1 → normal plaintext save (calls edSave)
+ *   2 → RCEX-encrypted save  (calls edSaveRCEX)
+ *   ESC → cancel */
+void edSaveOptions(void){
+    edSetStatusMessage("Save: [1] Normal  [2] RCEX Encrypt  ESC=Cancel");
+    edRefreshScreen();
+
+    while(1){
+        int c = edReadKey();
+        if(c == '1'){
+            edSave();
+            return;
+        }
+        else if(c == '2'){
+            edSaveRCEX();
+            return;
+        }
+        else if(c == '\x1b'){
+            edSetStatusMessage("Save cancelled");
+            return;
+        }
+        /* any other key → re-display the prompt */
+        edSetStatusMessage("Save: [1] Normal  [2] RCEX Encrypt  ESC=Cancel");
+        edRefreshScreen();
+    }
+}
+
+/* edLoadPlaintextBytes: binary-safe replacement for edLoadFileRows when the
+ * source is already a raw byte buffer (e.g. decrypted ciphertext) rather than
+ * an open FILE*.  Splits on '\n' (stripping any trailing '\r'), exactly like
+ * edLoadFileRows does when reading a text file.
+ *
+ * Precondition: the editor buffer has already been cleared (edFreeAllRows).
+ * The data pointer is read-only; no ownership is taken. */
+void edLoadPlaintextBytes(const char *data, int datalen){
+    const char *p   = data;
+    const char *end = data + datalen;
+
+    while(p <= end){
+        /* find the next newline (or end-of-buffer) */
+        const char *nl = p;
+        while(nl < end && *nl != '\n'){ nl++; }
+
+        int rowlen = (int)(nl - p);
+        /* strip trailing \r (Windows line endings) */
+        if(rowlen > 0 && p[rowlen - 1] == '\r'){ rowlen--; }
+
+        edInsertRow(E.nrows, (char *)p, rowlen);
+
+        if(nl >= end){ break; }
+        p = nl + 1;   /* skip past the '\n' */
+    }
+}
+
+/* edOpenFileRCEX: opens an RCEX-encrypted file, verifies its MAC, decrypts it,
+ * and loads the resulting plaintext into the editor rows.
+ *
+ * Expected on-disk format (written by edSaveRCEX):
+ *   [ nonce : RCEX_NONCE_LEN bytes ]
+ *   [ mac   : MACLEN bytes         ]
+ *   [ ciphertext : N bytes         ]
+ *
+ * The key is collected via edPromptKey() (masked).
+ * Returns 1 on success, 0 on any failure (editor buffer is left empty on
+ * failure; caller must not commit E.filename until this returns 1). */
+int edOpenFileRCEX(const char *filename){
+    /* ---- 1. Read the whole file as raw bytes ---- */
+    FILE *fp = fopen(filename, "rb");
+    if(!fp){
+        edSetStatusMessage("Can't open file: %s", strerror(errno));
+        return 0;
+    }
+
+    /* Determine file size */
+    if(fseek(fp, 0, SEEK_END) != 0){ fclose(fp); edSetStatusMessage("Read error: %s", strerror(errno)); return 0; }
+    long fsz = ftell(fp);
+    if(fsz < 0){ fclose(fp); edSetStatusMessage("Read error: %s", strerror(errno)); return 0; }
+    rewind(fp);
+
+    int filelen = (int)fsz;
+    int header  = RCEX_NONCE_LEN + MACLEN;   /* 16 + 16 = 32 bytes */
+
+    if(filelen < header){
+        fclose(fp);
+        edSetStatusMessage("Not a valid RCEX file (too small)");
+        return 0;
+    }
+
+    unsigned char *filebuf = malloc((size_t)filelen);
+    if(!filebuf){
+        fclose(fp);
+        edSetStatusMessage("RCEX open failed: out of memory");
+        return 0;
+    }
+
+    if((int)fread(filebuf, 1, (size_t)filelen, fp) != filelen){
+        fclose(fp); free(filebuf);
+        edSetStatusMessage("RCEX open failed: short read");
+        return 0;
+    }
+    fclose(fp);
+
+    /* ---- 2. Split into header fields ---- */
+    int8 *nonce      = filebuf;                          /* first 16 bytes */
+    int8 *stored_mac = filebuf + RCEX_NONCE_LEN;         /* next  16 bytes */
+    int8 *ciphertext = filebuf + header;                 /* remaining bytes */
+    int   ctlen      = filelen - header;
+
+    /* ---- 3. Collect the decryption key (masked) ---- */
+    char *key = edPromptKey("RCEX Key:");
+    if(!key){
+        free(filebuf);
+        edSetStatusMessage("Open cancelled");
+        return 0;
+    }
+
+    int16 keylen = (int16)strlen(key);
+    if(!rcexvalidate((int8 *)key, keylen)){
+        memset(key, 0, (size_t)keylen);
+        free(key);
+        free(filebuf);
+        edSetStatusMessage("RCEX open failed: invalid key");
+        return 0;
+    }
+
+    /* ---- 4. Verify MAC before decrypting (key||nonce-keyed, matches edSaveRCEX) ---- */
+    int8 computed_mac[MACLEN];
+    {
+        int16 mklen   = keylen + (int16)RCEX_NONCE_LEN;
+        int8 *mac_key = malloc((size_t)mklen);
+        if(!mac_key){
+            memset(key, 0, (size_t)keylen);
+            free(key);
+            memset(filebuf, 0, (size_t)filelen);
+            free(filebuf);
+            edSetStatusMessage("RCEX open failed: out of memory");
+            return 0;
+        }
+        memcpy(mac_key,         key,   keylen);
+        memcpy(mac_key + keylen, nonce, RCEX_NONCE_LEN);
+        rcexmac(mac_key, mklen, ciphertext, (int16)ctlen, computed_mac);
+        memset(mac_key, 0, (size_t)mklen);
+        free(mac_key);
+    }
+
+    /* Constant-time comparison */
+    int8 mac_diff = 0;
+    for(int i = 0; i < MACLEN; i++){ mac_diff |= (computed_mac[i] ^ stored_mac[i]); }
+    if(mac_diff != 0){
+        /* MAC mismatch — wrong key or tampered file */
+        memset(key, 0, (size_t)keylen);
+        free(key);
+        memset(filebuf, 0, (size_t)filelen);
+        free(filebuf);
+        edSetStatusMessage("RCEX open failed: wrong key or file is corrupted/tampered");
+        return 0;
+    }
+
+    /* ---- 5. Initialise RCEX context (same key+nonce as encryption) ---- */
+    Rcex *ctx = rcexinit_nonce((int8 *)key, keylen, nonce, RCEX_NONCE_LEN);
+
+    /* Wipe key immediately after context is ready */
+    memset(key, 0, (size_t)keylen);
+    free(key);
+    key = NULL;
+
+    if(!ctx){
+        memset(filebuf, 0, (size_t)filelen);
+        free(filebuf);
+        edSetStatusMessage("RCEX open failed: context init error");
+        return 0;
+    }
+
+    /* ---- 6. Decrypt (stream cipher: same op as encrypt) ---- */
+    edSetStatusMessage("Decrypting with RCEX...");
+    edRefreshScreen();
+
+    int8 *plaintext = rcexdecrypt(ctx, ciphertext, (int16)ctlen);
+    rcexwipe(ctx);   /* wipe & free context immediately */
+
+    /* Wipe and free the encrypted buffer */
+    memset(filebuf, 0, (size_t)filelen);
+    free(filebuf);
+    filebuf = ciphertext = nonce = stored_mac = NULL;
+
+    if(!plaintext){
+        edSetStatusMessage("RCEX open failed: decryption error");
+        return 0;
+    }
+
+    /* ---- 7. Load decrypted bytes into editor rows ---- */
+    edLoadPlaintextBytes((const char *)plaintext, ctlen);
+
+    /* Wipe and free the plaintext buffer (sensitive) */
+    memset(plaintext, 0, (size_t)ctlen);
+    free(plaintext);
+
+    return 1;   /* success */
+}
+
 void edOpenFile(){  // Ctrl-O: prompts for a filename and replaces the current buffer with that file's contents
+  /* ---- unsaved-changes guard (existing behaviour) ---- */
   if(E.dirty){
     char * confirm = edPrompt("Unsaved changes. Open anyway? (y/n): %s", NULL);
     if(confirm == NULL){ edSetStatusMessage("Open cancelled"); return; }
@@ -743,32 +1181,66 @@ void edOpenFile(){  // Ctrl-O: prompts for a filename and replaces the current b
     if(!ok){ edSetStatusMessage("Open cancelled"); return; }
   }
 
+  /* ---- collect filename ---- */
   char * filename = edPrompt("Open file: %s (ESC to cancel)", NULL);
   if(filename == NULL){ return; }
 
-  FILE * fp = fopen(filename, "r");  // test-open the new file BEFORE touching the current buffer
-  if(!fp){
+  /* ---- verify the file exists before touching the current buffer ---- */
+  FILE * probe = fopen(filename, "r");
+  if(!probe){
     edSetStatusMessage("Can't open file: %s", strerror(errno));
     free(filename);
     return;
   }
+  fclose(probe);   /* just a probe; re-open below with the right mode */
 
+  /* ---- ask whether to RCEX-decrypt ---- */
+  char *decrypt_choice = edPrompt("Decrypt with RCEX? (y/n): %s", NULL);
+  int do_decrypt = 0;
+  if(decrypt_choice == NULL){
+    /* ESC → cancel entire open */
+    free(filename);
+    edSetStatusMessage("Open cancelled");
+    return;
+  }
+  do_decrypt = (decrypt_choice[0] == 'y' || decrypt_choice[0] == 'Y');
+  free(decrypt_choice);
+
+  /* ---- commit: clear the current buffer NOW ---- */
   edFreeAllRows();
-  E.curx = 0;
-  E.cury = 0;
-  E.rowoff = 0;
-  E.coloff = 0;
-
+  E.curx = 0; E.cury = 0; E.rowoff = 0; E.coloff = 0;
   free(E.filename);
-  E.filename = filename;  // edPrompt already handed us an owned, malloc'd string -- take it as-is
+  E.filename = filename;
 
-  edLoadFileRows(fp);
-  fclose(fp);
-
-  E.dirty = 0;
-  edSelectSyntaxHighlight();  // pick highlighting for the new extension; bracket matching follows automatically next edScroll
-  edSetStatusMessage("Opened \"%s\"", E.filename);
+  if(do_decrypt){
+    /* edOpenFileRCEX prompts for the key, reads binary, verifies MAC,
+     * decrypts, and calls edLoadPlaintextBytes internally. */
+    if(!edOpenFileRCEX(filename)){
+      /* Failed — buffer is empty; keep E.filename so the status bar is
+       * informative, but mark dirty=0 so Ctrl-Q doesn't complain. */
+      E.dirty = 0;
+      return;
+    }
+    E.dirty = 0;
+    edSelectSyntaxHighlight();
+    edSetStatusMessage("File decrypted successfully: \"%s\"", E.filename);
+  } else {
+    /* Normal plaintext open (existing behaviour) */
+    FILE * fp = fopen(filename, "r");
+    if(!fp){
+      edSetStatusMessage("Can't open file: %s", strerror(errno));
+      E.dirty = 0;
+      return;
+    }
+    edLoadFileRows(fp);
+    fclose(fp);
+    E.dirty = 0;
+    edSelectSyntaxHighlight();
+    edSetStatusMessage("Opened \"%s\"", E.filename);
+  }
 }
+
+/* ---------- end RCEX-open helpers ---------- */
 
 /* Find */
 
@@ -1022,7 +1494,7 @@ void edProcessKeypress(){
             break;
         
         case CTRL_KEY('s'):
-            edSave();
+            edSaveOptions();
             break;
 
         case CTRL_KEY('o'):

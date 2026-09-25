@@ -1,8 +1,10 @@
-CC = gcc
+CC     = gcc
 CFLAGS = -Wall -Wextra -Werror -std=c23
 
-ASTE: ASTE.c
-	$(CC) $(CFLAGS) ASTE.c -o ASTE
+SRCS   = ASTE.c RCEX_enc/rcex.c
+
+ASTE: $(SRCS)
+	$(CC) $(CFLAGS) $(SRCS) -o ASTE
 
 clean:
 	rm -f ASTE

@@ -19,6 +19,10 @@
 #include<time.h>
 #include<stdarg.h>
 #include <fcntl.h>
+#include "RCEX_enc/rcex.h"
+
+/* RCEX integration constants */
+#define RCEX_NONCE_LEN  16   /* bytes of random nonce prepended to each encrypted file */
 
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define TAB_STOP 8
@@ -153,6 +157,16 @@ void edOpen(char * filename);
 char *edRowsToString(int * bufferlen);
 void edSave(void);
 void edOpenFile(void);
+
+/* RCEX Save */
+int  edWriteToFile(const char *filename, const unsigned char *data, int datalen);
+char *edPromptKey(const char *prompt_label);
+void edSaveRCEX(void);
+void edSaveOptions(void);
+
+/* RCEX Open */
+void edLoadPlaintextBytes(const char *data, int datalen);
+int  edOpenFileRCEX(const char *filename);
 
 /* Find */
 void edFindCallback(char * query, int key);
