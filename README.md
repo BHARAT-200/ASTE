@@ -185,21 +185,31 @@ The cipher generates a keystream by XORing plaintext with pseudorandom bytes.
 - **Line endings**: Handles `\n` and `\r\n`, but always saves with `\n`
 - **Unicode**: Basic ASCII support, limited multi-byte character handling
 
-## Security Notes
+## Security & Testing
 
 **RCEX is a custom stream cipher implementation** and has not undergone professional cryptographic review or formal security analysis. While it includes authentication (MAC) to detect tampering and wrong keys, it should not be considered equivalent to well-established ciphers like AES-GCM.
 
-Key security features:
+### Key Security Features
+
 - Keys are masked during input
 - Keys and plaintext are wiped from memory after use
-- MAC prevents decryption with wrong keys
-- Nonces ensure unique keystreams per encryption
+- MAC provides tamper detection and wrong-key detection
+- Nonces provide unique keystreams per encryption
 
-Key limitations:
+### Testing & Validation
+
+- NIST Statistical Test Suite testing on **100 bitstreams**, covering frequency, runs, FFT, rank, entropy, linear complexity, and other randomness tests
+- **1,000,000-trial early-keystream position-bias testing** across 256 byte positions
+- **100,000-trial related-key and differential testing** to evaluate key sensitivity and ciphertext diffusion
+- Weak-key testing using zero, FF, AA, 55, and single-bit key patterns
+- **10,000-trial next-byte prediction testing**, achieving approximately random-guessing accuracy
+
+### Key Limitations
+
 - Custom cipher without formal security proof
 - No key derivation function (raw password used directly)
 - No protection against side-channel attacks
-- Keys vulnerable to keyloggers, memory dumps, etc.
+- Keys remain vulnerable to keyloggers, memory dumps, and other endpoint attacks
 
 **For sensitive data**, consider using established encryption tools like GPG, age, or OpenSSL instead.
 
