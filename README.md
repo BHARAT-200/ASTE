@@ -43,7 +43,7 @@ ASTE is a terminal-based text editor written in C with built-in file encryption 
 ### Compilation
 
 ```bash
-make
+make ASTE
 ```
 
 To clean build artifacts:
@@ -58,6 +58,10 @@ Start ASTE without a file (blank editor):
 
 ```bash
 ./ASTE
+```
+or
+```bash
+make run
 ```
 
 Open an existing file:
